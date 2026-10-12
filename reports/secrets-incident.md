@@ -2,10 +2,10 @@
 
 - Scanner và phiên bản: Gitleaks **8.30.1** (`gitleaks version`; binary Windows x64 tải từ release chính thức, SHA-256 `d29144de…2afc4e` khớp `gitleaks_8.30.1_checksums.txt`), config `.gitleaks.toml` (default rules + rule `lab24-synthetic-token`).
 - Commit chứa token giả: `1bdd849` (`1bdd849922156c868a5ee9293d68f5b72e242d2c`, "chore: seed student lab with synthetic secret exercise"); file bị xoá ở commit sau nên HEAD không còn.
-- File, rule và kết quả quét lịch sử: `gitleaks git --config .gitleaks.toml --redact --verbose .` → 11 commit, **leaks found: 1** — `File: lab-fake-secret.txt`, `Line: 1`, `RuleID: lab24-synthetic-token`, `Commit: 1bdd849…`, giá trị đã `REDACTED`. Đây là token giả có chủ đích của bài lab (`LAB24-DEMO`), không phải credential thật; lệnh trả exit code 1 đúng như dự kiến.
-- Kết quả quét file hiện tại: `gitleaks dir --config .gitleaks.toml .` → **no leaks found**; `pre-commit run --all-files` (hook `gitleaks-system`, `rev: v8.30.1`, `pass_filenames: false`) → Passed.
+- File, rule và kết quả quét lịch sử: `gitleaks git --config .gitleaks.toml --redact --verbose .` → lần quét đầu (checkpoint 4) 11 commit, quét lại trước khi nộp 16 commit — cả hai lần **leaks found: 1**, exit code 1 — `File: lab-fake-secret.txt`, `Line: 1`, `RuleID: lab24-synthetic-token`, `Commit: 1bdd849…`, giá trị đã `REDACTED`. Đây là token giả có chủ đích của bài lab (`LAB24-DEMO`), không phải credential thật; exit code 1 là kết quả mong đợi của CP4. Lệnh rút gọn trên trang lab `gitleaks git --config .gitleaks.toml --redact .` cho cùng kết quả.
+- Kết quả quét file hiện tại: `gitleaks dir --config .gitleaks.toml --redact .` → **no leaks found**, exit code 0 (đã quét cả `.venv/`, không có false positive nên **không chỉnh allowlist** trong `.gitleaks.toml`, rule `lab24-synthetic-token` giữ nguyên); `pre-commit run --all-files` (hook `gitleaks-system`, `rev: v8.30.1`, `pass_filenames: false`) → Passed.
 - Nếu đây là credential thật, cần xử lý thế nào:
-  1. **Thu hồi / rotate ngay** credential tại hệ thống phát hành (revoke token, cấp token mới, cập nhật nơi dùng qua secret manager) — đây là bước bắt buộc và đầu tiên.
+  1. **Thu hồi / rotate ngay tại dịch vụ cấp token** (revoke token, cấp token mới, cập nhật nơi dùng qua secret manager) — đây là bước bắt buộc và đầu tiên.
   2. Kiểm log truy cập của hệ thống đó từ thời điểm commit `1bdd849` để tìm lạm dụng; mở incident và báo DPO/bộ phận bảo mật nếu có dữ liệu cá nhân liên quan.
   3. Sau khi đã rotate, mới cân nhắc xoá khỏi lịch sử (`git filter-repo`) + force-push + yêu cầu mọi clone/fork đồng bộ lại; ghi chú rằng bản sao đã bị clone/cache vẫn có thể còn.
   4. Thêm rule/hook để ngăn tái diễn (đã làm: hook gitleaks pin phiên bản).

@@ -11,4 +11,15 @@ Phạm vi: agent mô phỏng chạy `--mock` trên dữ liệu **synthetic**. C�
 | OWASP **ASI03** Identity & Privilege Abuse | OBO: quyền hiệu lực = `allowed_tools ∩ agent_scopes ∩ parent_scopes`; deny unknown principal, purpose sai, TTL hết hạn | `agent/policy.py:75-78`, `agent/policy.py:95`, `agent/policy.py:101`, `agent/policy.py:109`; `tests/test_obo.py` | `--as` chỉ là principal **mô phỏng** từ `data/principals.json`, không phải xác thực production |
 | OWASP **ASI04** Agentic Supply Chain Vulnerabilities | Hash-pinned `requirements.lock` + `pip install --require-hashes`; hook `gitleaks-system` pin `v8.30.1`; quét lịch sử tìm token giả | `requirements.lock`; `.pre-commit-config.yaml:3-8`; `reports/secrets-incident.md` | Hash lock sinh trên Windows/Python 3.13; không có SBOM, không ký artifact, không kiểm tool/MCP server bên thứ ba |
 
+## Nguồn
+
+Mọi nguồn được kiểm ngày 12/10/2026. Chỉ đối chiếu số hiệu, ngày ban hành/hiệu lực và tên văn bản; **chưa đọc đối chiếu từng điều khoản**, nên bảng trên không trích điều/khoản nào.
+
+| Văn bản | Nguồn chính thức | Đã kiểm | Ghi chú |
+|---|---|---|---|
+| Luật 91/2025/QH15 — Luật Bảo vệ dữ liệu cá nhân | [Cổng TTĐT Bộ Công an — CSDL văn bản](https://bocongan.gov.vn/chinh-sach-phap-luat/co-so-du-lieu-van-ban/luat-bao-ve-du-lieu-ca-nhan-1753688803) | Số hiệu 91/2025/QH15, hiệu lực 01/01/2026, trạng thái "Còn hiệu lực" (trang chính thức) | Ngày thông qua 26/06/2025 chỉ thấy ở nguồn thứ cấp |
+| NĐ 356/2025/NĐ-CP — quy định chi tiết Luật BVDLCN | [CSDL quốc gia về VBPL — Bộ Tư pháp (file .doc)](https://vbpl.moj.gov.vn/TW/Lists/vbpq/Attachments/187276/ND.356.2025.doc) | Số hiệu, ban hành 31/12/2025, dẫn chiếu Luật 91/2025/QH15 | Hiệu lực 01/01/2026 và việc thay thế NĐ 13/2023 lấy từ nguồn thứ cấp: **chưa xác minh** trên văn bản gốc |
+| Luật 134/2025/QH15 — Luật Trí tuệ nhân tạo | **Chưa tìm được bản trên cổng nhà nước** (chinhphu.vn / vbpl.moj.gov.vn / quochoi.vn); bản tham khảo thứ cấp: [Thư viện Pháp luật](https://thuvienphapluat.vn/van-ban/Cong-nghe-thong-tin/Luat-Tri-tue-nhan-tao-2025-so-134-2025-QH15-679013.aspx) | Thông qua 10/12/2025, hiệu lực 01/03/2026 — chỉ theo nguồn thứ cấp | Nguồn chính thức: **chưa xác minh** |
+| OWASP Top 10 for Agentic Applications for 2026 | [OWASP GenAI Security Project](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) | Trang chính thức, ngày đăng 09/12/2025 | Trang tóm tắt không ghi tên từng mục; tên ASI01 "Agent Goal Hijack", ASI03 "Identity & Privilege Abuse", ASI04 "Agentic Supply Chain Vulnerabilities" lấy từ tài liệu thứ cấp, cần đối chiếu bản PDF của OWASP |
+
 Chỉ ghi điều khoản cụ thể khi đã đối chiếu văn bản gốc. Mô phỏng kỹ thuật không tự chứng minh tuân thủ pháp luật.
