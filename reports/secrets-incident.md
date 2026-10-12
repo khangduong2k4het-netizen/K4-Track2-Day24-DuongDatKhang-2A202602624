@@ -1,8 +1,12 @@
 # Secret giả trong lịch sử Git — điền trong checkpoint 4
 
-- Scanner và phiên bản:
-- Commit chứa token giả:
-- File, rule và kết quả quét lịch sử:
-- Kết quả quét file hiện tại:
+- Scanner và phiên bản: Gitleaks **8.30.1** (`gitleaks version`; binary Windows x64 tải từ release chính thức, SHA-256 `d29144de…2afc4e` khớp `gitleaks_8.30.1_checksums.txt`), config `.gitleaks.toml` (default rules + rule `lab24-synthetic-token`).
+- Commit chứa token giả: `1bdd849` (`1bdd849922156c868a5ee9293d68f5b72e242d2c`, "chore: seed student lab with synthetic secret exercise"); file bị xoá ở commit sau nên HEAD không còn.
+- File, rule và kết quả quét lịch sử: `gitleaks git --config .gitleaks.toml --redact --verbose .` → 11 commit, **leaks found: 1** — `File: lab-fake-secret.txt`, `Line: 1`, `RuleID: lab24-synthetic-token`, `Commit: 1bdd849…`, giá trị đã `REDACTED`. Đây là token giả có chủ đích của bài lab (`LAB24-DEMO`), không phải credential thật; lệnh trả exit code 1 đúng như dự kiến.
+- Kết quả quét file hiện tại: `gitleaks dir --config .gitleaks.toml .` → **no leaks found**; `pre-commit run --all-files` (hook `gitleaks-system`, `rev: v8.30.1`, `pass_filenames: false`) → Passed.
 - Nếu đây là credential thật, cần xử lý thế nào:
-- Vì sao xoá file khỏi HEAD hoặc pin dependency vẫn chưa đủ:
+  1. **Thu hồi / rotate ngay** credential tại hệ thống phát hành (revoke token, cấp token mới, cập nhật nơi dùng qua secret manager) — đây là bước bắt buộc và đầu tiên.
+  2. Kiểm log truy cập của hệ thống đó từ thời điểm commit `1bdd849` để tìm lạm dụng; mở incident và báo DPO/bộ phận bảo mật nếu có dữ liệu cá nhân liên quan.
+  3. Sau khi đã rotate, mới cân nhắc xoá khỏi lịch sử (`git filter-repo`) + force-push + yêu cầu mọi clone/fork đồng bộ lại; ghi chú rằng bản sao đã bị clone/cache vẫn có thể còn.
+  4. Thêm rule/hook để ngăn tái diễn (đã làm: hook gitleaks pin phiên bản).
+- Vì sao xoá file khỏi HEAD hoặc pin dependency vẫn chưa đủ: xoá khỏi HEAD không xoá khỏi lịch sử Git — ai có clone/fork vẫn đọc được commit `1bdd849`, và kể cả viết lại lịch sử cũng không thu hồi được bản đã bị sao chép; chỉ **rotate/thu hồi** mới làm credential lộ trở nên vô dụng. Pin dependency bằng `requirements.lock` (`--require-hashes`) chống thay đổi gói phụ thuộc ngoài ý muốn (supply chain), và hook gitleaks chặn secret **mới** trước khi commit — cả hai là biện pháp phòng ngừa cho tương lai, không có tác dụng gì với secret đã nằm trong lịch sử.

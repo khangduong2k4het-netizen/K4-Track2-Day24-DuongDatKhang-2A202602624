@@ -1,0 +1,8 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks-system
+        # Quét file hiện tại; `gitleaks git` chỉ nhận một repo path nên không truyền filenames.
+        entry: gitleaks dir --config .gitleaks.toml --redact --verbose .
+        pass_filenames: false
