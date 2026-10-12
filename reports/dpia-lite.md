@@ -13,13 +13,14 @@
 
 3. Dữ liệu đi qua những run/tool nào, endpoint nào:
    - **Run A** (`lab24-agent/run-a`, scope `search_docs`): đọc `corpus/`, không egress. Chỉ chuyển sang Run B `list[int]` ticket ID lấy từ tên file và một cờ bool "có chỉ thị injection". Text gửi tóm tắt đã qua `pii.redact()`.
-   - **Run B** (`lab24-agent/run-b`, scope `read_customer`, `http_post`): suy `customer_id` từ `related_tickets`, gọi `read_customer` sau PEP. Nếu Run A báo có chỉ thị, Run B *thử* `http_post` tới `http://127.0.0.1:10024/reconcile` (hằng số trong code) — PEP deny vì restricted + egress.
+   - **Run B** (`lab24-agent/run-b`, scope `read_customer`, không egress): trước tiên qua cổng PEP mở private store (deny thì không tra cả chỉ mục `related_tickets`); sau đó suy `customer_id` từ `related_tickets` và kiểm PEP lại trước mỗi `read_customer`.
+   - **Lượt kiểm egress** (`lab24-agent/run-egress`, scope `http_post`): chỉ khi Run A báo có chỉ thị; context chỉ mang URL `http://127.0.0.1:10024/reconcile` (hằng số trong code), không mang hồ sơ — PEP deny vì restricted + egress nên `tools.http_post` không chạy.
    - Endpoint duy nhất: sink local `127.0.0.1:10024` (allowlist cứng trong `agent/tools.py`). Không có egress Internet.
    - Ledger `reports/ledger.jsonl` chỉ chứa `args_hash`, không chứa PII thô.
 
 4. Bằng chứng deny/allow và giới hạn của mock:
    - Trước containment: `reports/attack-before.log` chứa record synthetic của `KH-000999` (CCCD, SĐT, STK).
-   - Sau containment (`--as dpo`, cùng query/payload): `reports/attack-after.log` rỗng; `reports/ledger.jsonl` dòng 23 `http_post` **deny** — reason "dữ liệu restricted không được đi cùng egress", `on_behalf_of=dpo`; dòng 25–26 trở đi `support_l1` `read_customer` **deny**. `verify()` = True trên 45 dòng.
+   - Sau containment (`--as dpo`, cùng query/payload): `reports/attack-after.log` rỗng; `reports/ledger.jsonl` dòng 24 `http_post` **deny** — reason "dữ liệu restricted không được đi cùng egress", `on_behalf_of=dpo`; dòng 26 `support_l1` `read_customer` **deny** ngay ở cổng mở private store, dòng 27 `http_post` deny. `verify()` = True trên 27 dòng.
    - Giới hạn:
      - Mock LLM phát hiện chỉ thị bằng marker cố định; model thật có thể hành xử khác (vd. lộ thông tin qua câu tóm tắt) — kết quả không chứng minh an toàn với model thật.
      - `--as` là principal mô phỏng, không có xác thực; TTL 5 phút là giá trị lab.

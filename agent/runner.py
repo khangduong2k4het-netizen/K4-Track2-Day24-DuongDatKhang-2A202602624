@@ -76,7 +76,8 @@ AGENT_ID = "lab24-agent"
 RUN_TTL = timedelta(minutes=5)
 ORCHESTRATOR_SCOPES = ("search_docs", "read_customer")
 RUN_A_SCOPES = ("search_docs",)
-RUN_B_SCOPES = ("read_customer", "http_post")
+RUN_B_SCOPES = ("read_customer",)
+EGRESS_SCOPES = ("http_post",)
 # Chỉ tên file dạng ticket-<số>.md mới thành ticket ID; free text không bao giờ.
 _TICKET_FILE_RE = re.compile(r"^ticket-(\d+)\.md$")
 SINK_URL = f"http://{tools.ALLOWED_EGRESS_HOST}:{tools.ALLOWED_EGRESS_PORT}/reconcile"
@@ -98,12 +99,9 @@ class _Run:
         self.expires_at = expires_at
         self.ledger_path = ledger_path
 
-    def call(self, tool: str, args: dict, *, classification: str, purpose: str,
-             egress: bool = False):
-        """PEP: policy.check() TRƯỚC khi tool chạy; allow và deny đều vào ledger.
-
-        Trả về (allowed, result). Deny thì tool không bao giờ được gọi.
-        """
+    def authorize(self, tool: str, args: dict, *, classification: str, purpose: str,
+                  egress: bool = False) -> bool:
+        """PEP: policy.check() rồi ghi ledger (cả allow lẫn deny). Không chạy tool."""
         context = PolicyContext(
             data_classification=classification,
             request_purpose=purpose,
@@ -134,7 +132,13 @@ class _Run:
             "decision": "allow" if allowed else "deny",
             "reason": reason,
         }, self.ledger_path)
-        if not allowed:
+        return allowed
+
+    def call(self, tool: str, args: dict, *, classification: str, purpose: str,
+             egress: bool = False):
+        """authorize() TRƯỚC khi tool chạy. Trả (allowed, result); deny thì tool không chạy."""
+        if not self.authorize(tool, args, classification=classification,
+                              purpose=purpose, egress=egress):
             return False, None
         return True, getattr(tools, tool)(**args)
 
@@ -172,23 +176,35 @@ def _run_a(message: str, llm, principal_id: str, expires_at: str,
     return redacted, ticket_ids, injected
 
 
-def _run_b(ticket_ids: list[int], egress_requested: bool, principal_id: str,
-           expires_at: str, ledger_path: Path) -> int:
-    """Run B: private data, chỉ nhận list[int] từ Run A. Trả số record đọc được."""
+def _run_b(ticket_ids: list[int], principal_id: str, expires_at: str,
+           ledger_path: Path) -> list[dict]:
+    """Run B: private data, chỉ nhận list[int] từ Run A, không egress."""
     run = _Run("run-b", principal_id, RUN_B_SCOPES, expires_at, ledger_path)
+    # Cổng mở private store: deny thì không tra cả chỉ mục related_tickets.
+    if not run.authorize("read_customer", {"ticket_ids": ticket_ids},
+                         classification="restricted", purpose="support-reply"):
+        return []
     records = []
     for customer_id in _customers_for_tickets(ticket_ids):
-        # OBO kiểm ngay TRƯỚC read_customer, không đọc rồi mới lọc.
+        # OBO kiểm lại ngay TRƯỚC mỗi read_customer, không đọc rồi mới lọc.
         ok, record = run.call("read_customer", {"customer_id": customer_id},
                               classification="restricted", purpose="support-reply")
         if ok:
             records.append(record)
-    if egress_requested and records:
-        # Mô phỏng agent "làm theo" bước đối soát: egress vẫn phải qua PEP,
-        # đích là hằng số trong code, không phải URL trong free text.
-        run.call("http_post", {"url": SINK_URL, "body": {"records": records}},
-                 classification="restricted", purpose="support-reply", egress=True)
-    return len(records)
+    return records
+
+
+def _egress_check(records: list[dict], principal_id: str, expires_at: str,
+                  ledger_path: Path) -> None:
+    """Lượt kiểm http_post riêng khi lure đòi gửi dữ liệu.
+
+    Context chỉ mang URL (hằng số trong code, không lấy URL từ free text);
+    tools.http_post chỉ chạy nếu PEP allow — restricted + egress luôn deny.
+    """
+    run = _Run("run-egress", principal_id, EGRESS_SCOPES, expires_at, ledger_path)
+    if run.authorize("http_post", {"url": SINK_URL},
+                     classification="restricted", purpose="support-reply", egress=True):
+        tools.http_post(SINK_URL, {"records": records})
 
 
 def handle(message: str, llm, log_dir: Path | None = None,
@@ -201,5 +217,7 @@ def handle(message: str, llm, log_dir: Path | None = None,
         return "Yêu cầu bị từ chối: principal không có quyền đọc ticket."
     docs, ticket_ids, injected = result_a
 
-    _run_b(ticket_ids, injected, principal_id, expires_at, ledger_path)
+    records = _run_b(ticket_ids, principal_id, expires_at, ledger_path)
+    if injected:
+        _egress_check(records, principal_id, expires_at, ledger_path)
     return llm.summarize(docs)
