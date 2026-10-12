@@ -51,5 +51,19 @@ class PolicyContext:
     expires_at: str = ""
 
 
+_CLASSIFICATIONS = ("public", "internal", "restricted")
+
+
 def check(context: PolicyContext) -> tuple[bool, str]:
-    raise NotImplementedError("BƯỚC 3b: implement policy check")
+    """Mọi nhánh đều trả reason non-empty; mặc định deny khi không rõ."""
+    classification = context.data_classification
+    if classification not in _CLASSIFICATIONS:
+        return False, f"deny: classification không xác định {classification!r} (fail closed)"
+
+    # Rule tối thiểu: chạy trước mọi rule khác, không principal nào vượt được.
+    if classification == "restricted" and context.egress_enabled:
+        return False, ("deny: dữ liệu restricted không được đi cùng egress "
+                       f"(tool={context.requested_tool or '?'}, agent={context.agent_owner})")
+
+    return True, (f"allow: {classification} data, egress={context.egress_enabled}, "
+                  f"agent={context.agent_owner}, purpose={context.request_purpose}")
