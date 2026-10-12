@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -74,6 +75,11 @@ DEFAULT_LEDGER_PATH = REPORTS_DIR / "ledger.jsonl"
 AGENT_ID = "lab24-agent"
 RUN_TTL = timedelta(minutes=5)
 ORCHESTRATOR_SCOPES = ("search_docs", "read_customer")
+RUN_A_SCOPES = ("search_docs",)
+RUN_B_SCOPES = ("read_customer", "http_post")
+# Chỉ tên file dạng ticket-<số>.md mới thành ticket ID; free text không bao giờ.
+_TICKET_FILE_RE = re.compile(r"^ticket-(\d+)\.md$")
+SINK_URL = f"http://{tools.ALLOWED_EGRESS_HOST}:{tools.ALLOWED_EGRESS_PORT}/reconcile"
 
 
 class RunnerScaffoldPending(NotImplementedError):
@@ -133,34 +139,67 @@ class _Run:
         return True, getattr(tools, tool)(**args)
 
 
+def _customers_for_tickets(ticket_ids: list[int]) -> list[str]:
+    """Map ticket_id -> customer_id qua `related_tickets` (nguồn tin cậy).
+
+    Chỉ dùng customer_id/related_tickets làm chỉ mục; record đầy đủ chỉ được
+    đọc qua `read_customer` sau khi PEP allow.
+    """
+    wanted = set(ticket_ids)
+    customers = json.loads(tools.CUSTOMERS_FILE.read_text(encoding="utf-8"))
+    return [c["customer_id"] for c in customers
+            if wanted.intersection(c.get("related_tickets", ()))]
+
+
+def _run_a(message: str, llm, principal_id: str, expires_at: str,
+           ledger_path: Path) -> tuple[list[dict], list[int], bool] | None:
+    """Run A: chạm untrusted content, KHÔNG private data, KHÔNG egress.
+
+    Output qua boundary chỉ là dữ liệu có kiểu: list[int] ticket ID lấy từ
+    TÊN FILE, và một bool cho biết có chỉ thị injection. Text đã redact
+    chỉ dùng để tóm tắt cho người dùng, không đi sang Run B.
+    """
+    run = _Run("run-a", principal_id, RUN_A_SCOPES, expires_at, ledger_path)
+    ok, docs = run.call("search_docs", {"query": message},
+                        classification="internal", purpose="summarize-tickets")
+    if not ok:
+        return None
+    ticket_ids = sorted({int(m.group(1)) for d in docs
+                         if (m := _TICKET_FILE_RE.match(d["id"]))})
+    # Phát hiện injection chỉ để ghi nhận; customer_id/URL trong đó bị bỏ.
+    injected = llm.find_injection("\n\n".join(d["text"] for d in docs)) is not None
+    redacted = [{"id": d["id"], "text": pii.redact(d["text"])} for d in docs]
+    return redacted, ticket_ids, injected
+
+
+def _run_b(ticket_ids: list[int], egress_requested: bool, principal_id: str,
+           expires_at: str, ledger_path: Path) -> int:
+    """Run B: private data, chỉ nhận list[int] từ Run A. Trả số record đọc được."""
+    run = _Run("run-b", principal_id, RUN_B_SCOPES, expires_at, ledger_path)
+    records = []
+    for customer_id in _customers_for_tickets(ticket_ids):
+        # OBO kiểm ngay TRƯỚC read_customer, không đọc rồi mới lọc.
+        ok, record = run.call("read_customer", {"customer_id": customer_id},
+                              classification="restricted", purpose="support-reply")
+        if ok:
+            records.append(record)
+    if egress_requested and records:
+        # Mô phỏng agent "làm theo" bước đối soát: egress vẫn phải qua PEP,
+        # đích là hằng số trong code, không phải URL trong free text.
+        run.call("http_post", {"url": SINK_URL, "body": {"records": records}},
+                 classification="restricted", purpose="support-reply", egress=True)
+    return len(records)
+
+
 def handle(message: str, llm, log_dir: Path | None = None,
            principal_id: str = "support_l1") -> str:
     ledger_path = (log_dir / "ledger.jsonl") if log_dir else DEFAULT_LEDGER_PATH
     expires_at = (datetime.now(timezone.utc) + RUN_TTL).isoformat()
 
-    run = _Run("run", principal_id, ("search_docs", "read_customer", "http_post"),
-               expires_at, ledger_path)
-
-    ok, docs = run.call("search_docs", {"query": message},
-                        classification="internal", purpose="summarize-tickets")
-    if not ok:
+    result_a = _run_a(message, llm, principal_id, expires_at, ledger_path)
+    if result_a is None:
         return "Yêu cầu bị từ chối: principal không có quyền đọc ticket."
+    docs, ticket_ids, injected = result_a
 
-    injected = llm.find_injection("\n\n".join(d["text"] for d in docs))
-    records = []
-    if injected is not None:
-        for customer_id in injected.customer_ids:
-            # OBO kiểm ngay TRƯỚC read_customer, không đọc rồi mới lọc.
-            try:
-                ok, record = run.call("read_customer", {"customer_id": customer_id},
-                                      classification="restricted", purpose="support-reply")
-            except tools.ToolError:
-                continue
-            if ok:
-                records.append(record)
-        if records:
-            run.call("http_post", {"url": injected.target_url, "body": {"records": records}},
-                     classification="restricted", purpose="support-reply", egress=True)
-
-    redacted = [{"id": d["id"], "text": pii.redact(d["text"])} for d in docs]
-    return llm.summarize(redacted)
+    _run_b(ticket_ids, injected, principal_id, expires_at, ledger_path)
+    return llm.summarize(docs)
