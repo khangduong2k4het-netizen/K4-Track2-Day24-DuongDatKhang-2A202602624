@@ -59,16 +59,108 @@ Interface bắt buộc (agent/loop.py import và gọi hàm này nếu tồn t�
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from agent import ledger, pii, tools
+from agent.policy import PolicyContext, check
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 DEFAULT_LEDGER_PATH = REPORTS_DIR / "ledger.jsonl"
+
+AGENT_ID = "lab24-agent"
+RUN_TTL = timedelta(minutes=5)
+ORCHESTRATOR_SCOPES = ("search_docs", "read_customer")
 
 
 class RunnerScaffoldPending(NotImplementedError):
     """Only the original 3c stub uses this to enable the CP1/CP2 baseline."""
 
 
+class _Run:
+    """Một run con hành động thay `principal_id`, với scope và TTL riêng."""
+
+    def __init__(self, name: str, principal_id: str, scopes: tuple[str, ...],
+                 expires_at: str, ledger_path: Path):
+        self.run_id = f"{name}-{uuid.uuid4().hex[:12]}"
+        self.agent_id = f"{AGENT_ID}/{name}"
+        self.principal_id = principal_id
+        self.scopes = scopes
+        self.expires_at = expires_at
+        self.ledger_path = ledger_path
+
+    def call(self, tool: str, args: dict, *, classification: str, purpose: str,
+             egress: bool = False):
+        """PEP: policy.check() TRƯỚC khi tool chạy; allow và deny đều vào ledger.
+
+        Trả về (allowed, result). Deny thì tool không bao giờ được gọi.
+        """
+        context = PolicyContext(
+            data_classification=classification,
+            request_purpose=purpose,
+            agent_owner=self.agent_id,
+            delegation_depth=1,
+            egress_enabled=egress,
+            principal_id=self.principal_id,
+            requested_tool=tool,
+            agent_scopes=self.scopes,
+            parent_scopes=ORCHESTRATOR_SCOPES,
+            expires_at=self.expires_at,
+        )
+        allowed, reason = check(context)
+        ledger.append({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "agent_id": self.agent_id,
+            "run_id": self.run_id,
+            "on_behalf_of": self.principal_id,
+            "expires_at": self.expires_at,
+            "tool": tool,
+            # Chỉ lưu hash của args, không ghi PII thô vào ledger.
+            "args_hash": hashlib.sha256(
+                json.dumps(args, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            ).hexdigest(),
+            "classification": classification,
+            "purpose": purpose,
+            "egress": egress,
+            "decision": "allow" if allowed else "deny",
+            "reason": reason,
+        }, self.ledger_path)
+        if not allowed:
+            return False, None
+        return True, getattr(tools, tool)(**args)
+
+
 def handle(message: str, llm, log_dir: Path | None = None,
            principal_id: str = "support_l1") -> str:
-    raise RunnerScaffoldPending("BƯỚC 3c: implement trifecta split")
+    ledger_path = (log_dir / "ledger.jsonl") if log_dir else DEFAULT_LEDGER_PATH
+    expires_at = (datetime.now(timezone.utc) + RUN_TTL).isoformat()
+
+    run = _Run("run", principal_id, ("search_docs", "read_customer", "http_post"),
+               expires_at, ledger_path)
+
+    ok, docs = run.call("search_docs", {"query": message},
+                        classification="internal", purpose="summarize-tickets")
+    if not ok:
+        return "Yêu cầu bị từ chối: principal không có quyền đọc ticket."
+
+    injected = llm.find_injection("\n\n".join(d["text"] for d in docs))
+    records = []
+    if injected is not None:
+        for customer_id in injected.customer_ids:
+            # OBO kiểm ngay TRƯỚC read_customer, không đọc rồi mới lọc.
+            try:
+                ok, record = run.call("read_customer", {"customer_id": customer_id},
+                                      classification="restricted", purpose="support-reply")
+            except tools.ToolError:
+                continue
+            if ok:
+                records.append(record)
+        if records:
+            run.call("http_post", {"url": injected.target_url, "body": {"records": records}},
+                     classification="restricted", purpose="support-reply", egress=True)
+
+    redacted = [{"id": d["id"], "text": pii.redact(d["text"])} for d in docs]
+    return llm.summarize(redacted)

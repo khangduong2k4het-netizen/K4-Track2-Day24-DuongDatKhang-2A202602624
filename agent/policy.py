@@ -34,7 +34,12 @@ không phải xác thực người dùng production.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+PRINCIPALS_FILE = Path(__file__).resolve().parent.parent / "data" / "principals.json"
 
 
 @dataclass(frozen=True)
@@ -54,6 +59,26 @@ class PolicyContext:
 _CLASSIFICATIONS = ("public", "internal", "restricted")
 
 
+def load_principals(path: Path | None = None) -> dict:
+    """Nguồn tin cậy MÔ PHỎNG — không phải xác thực danh tính production."""
+    return json.loads((path or PRINCIPALS_FILE).read_text(encoding="utf-8"))
+
+
+def _parse_expiry(value: str) -> datetime | None:
+    try:
+        expiry = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+    return expiry if expiry.tzinfo else None
+
+
+def effective_scopes(context: PolicyContext, principal: dict) -> set[str]:
+    scopes = set(principal.get("allowed_tools", ())) & set(context.agent_scopes)
+    if context.delegation_depth > 0:
+        scopes &= set(context.parent_scopes)
+    return scopes
+
+
 def check(context: PolicyContext) -> tuple[bool, str]:
     """Mọi nhánh đều trả reason non-empty; mặc định deny khi không rõ."""
     classification = context.data_classification
@@ -65,5 +90,27 @@ def check(context: PolicyContext) -> tuple[bool, str]:
         return False, ("deny: dữ liệu restricted không được đi cùng egress "
                        f"(tool={context.requested_tool or '?'}, agent={context.agent_owner})")
 
-    return True, (f"allow: {classification} data, egress={context.egress_enabled}, "
-                  f"agent={context.agent_owner}, purpose={context.request_purpose}")
+    # OBO: agent chỉ hành động trong phạm vi quyền của người ra lệnh.
+    principal = load_principals().get(context.principal_id)
+    if principal is None:
+        return False, f"deny: principal không xác định {context.principal_id!r}"
+
+    expiry = _parse_expiry(context.expires_at)
+    if expiry is None:
+        return False, f"deny: expires_at thiếu hoặc sai định dạng {context.expires_at!r}"
+    if expiry <= datetime.now(timezone.utc):
+        return False, f"deny: phiên ủy quyền đã hết hạn lúc {context.expires_at}"
+
+    if context.request_purpose not in principal.get("purposes", ()):
+        return False, (f"deny: purpose {context.request_purpose!r} không nằm trong purposes "
+                       f"của {context.principal_id}")
+
+    scopes = effective_scopes(context, principal)
+    if context.requested_tool not in scopes:
+        return False, (f"deny: {context.principal_id} không có quyền hiệu lực gọi "
+                       f"{context.requested_tool!r} (effective={sorted(scopes)}, "
+                       f"depth={context.delegation_depth})")
+
+    return True, (f"allow: {context.principal_id} gọi {context.requested_tool} cho "
+                  f"{context.request_purpose}, {classification} data, egress={context.egress_enabled}, "
+                  f"agent={context.agent_owner}")
